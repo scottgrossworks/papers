@@ -1,0 +1,423 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN">
+<HTML>
+<HEAD>
+	<META HTTP-EQUIV="CONTENT-TYPE" CONTENT="text/html; charset=windows-1252">
+	<TITLE>Asynchronous Messaging Design Pattern for AWS Lambda Services</TITLE>
+
+
+    <meta name="description" content="A whitepaper entitled Asynchronous Messaging Design Pattern for AWS Lambda Services">
+	
+    <meta name="keywords" content="aws, awsprogramming, serverless, saas, amazon web services, python, pythonprogramming, asynchronous, The Leedz, leedz, leads, lead generation, sales leads, parties, events, event production, talent, event planner, 
+    event planning, wedding planning, wedding planner, weddings, quincineara, bookings, crm, catering, service providers, thumbtack, gigsalad, gigs, gig economy, vendors, marketing, 
+    small business, sales, leads, parties">
+	
+	<meta name="author" content="Scott Gross">
+
+
+	<STYLE TYPE="text/css">
+	<!--
+		@page { margin: 0.79in }
+		P { margin-bottom: 0.08in }
+		A:link { so-language: zxx }
+	-->
+	</STYLE>
+</HEAD>
+
+
+<BODY LANG="en-US" DIR="LTR">
+<TABLE style="width:80vw;margin:0 auto">
+        <TR><TD>
+
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">												April,
+2024</FONT></FONT></P>
+<BR>
+
+        <BR>
+
+<P ALIGN=CENTER STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=3 STYLE="font-size: 14pt">
+<a href="async/index.html">
+                <B>Asynchronous Messaging Design Pattern for AWS Lambda Services</B></FONT></FONT>
+                </a>
+</P>
+<BR>
+
+
+
+
+        
+<P ALIGN=CENTER STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=3 STYLE="font-size: 14pt">
+        <a href="direct/index.html">
+                        <B>Optimizing Your Web App with API Gateway Direct Integration</B></FONT></FONT>
+                        </a>
+        </P>
+        <BR>
+
+
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">Scott
+Gross</FONT></FONT>
+<BR>
+<FONT COLOR="#007826"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>theleedz.com</B></FONT></FONT></FONT></P>
+
+<BR>
+
+<BR>
+
+<BR>       
+<a href="http://scottgross.works" style='color:black'>scottgross.works</a>
+<BR>
+<a href="http://scottgross.works" style='color:#007826'>theleedz.com</a>
+
+<BR>
+<BR>
+<BR>
+</font>
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=3><B>Overview</B></FONT></FONT>
+
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">The
+Leedz runs on AWS as a collection of Lambda functions which call on
+resources like DynamoDB and SES, the email sending service.  Each
+time a user posts or buys a leed, the Lambda receiving the  API
+request chains together several subroutines before returning data to
+the client.  Instead of calling these functions serially and making
+the user wait for them all to return in order, the Leedz does its
+bookkeeping <B>asynchronously</B> for a better, faster user
+experience.  This paper shows how to do it.</FONT></FONT></P>
+<BR>
+
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=3><B>The
+Problem</B></FONT></FONT>
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">Most
+client actions trigger a chain of functions and infrastructure
+service requests on the back-end. When a user posts a leed, for
+example, the lambda handler calls on AWS Location Service to check
+for an existing booking matching the same trade, date and location. 
+The client should wait for this check to succeed before proceeding or
+receive an error code indicating the post has failed.</FONT></FONT></P>
+
+
+<P STYLE="margin-bottom: 0in"><IMG SRC="whitepaper_async_html_77f27596.jpg" NAME="graphics1" ALIGN=LEFT WIDTH=650 HEIGHT=366 BORDER=0><BR CLEAR=LEFT>
+
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">The
+dashed line suggests, however, that once a leed has been validated
+and added to the DB there are other bookkeeping and messaging tasks
+the user <I>shouldn't</I> have to wait for.  For example, sending an
+email to each of the users subscribed to that trade.  The system can
+compose the response data and return control to the client
+immediately while performing these additional functions in the
+background and potentially in parallel.</FONT></FONT></P>
+<BR>
+<P STYLE="margin-bottom: 0in"><IMG SRC="whitepaper_async_html_m6d57078.jpg" NAME="graphics2" ALIGN=LEFT WIDTH=653 HEIGHT=367 BORDER=0><BR CLEAR=LEFT><BR>
+</P>
+<BR>
+
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=3><B>Functional
+Code Separation</B></FONT></FONT>
+
+
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">The
+first step to implementing these helper functions asynchronously is
+to break them out of the main lambda function and into their own
+files. This follows the AWS best practice called Functional Code Separation.</FONT></FONT>
+</P>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in"><IMG SRC="whitepaper_async_html_m2a3e8b5a.jpg" NAME="graphics3" ALIGN=LEFT WIDTH=633 HEIGHT=299 BORDER=0><BR CLEAR=LEFT><BR>
+</P>
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">In
+the Lambda console create a new Lambda function for each subroutine
+and name it according to the task it performs.  Under <B>Permissions
+</B><SPAN STYLE="font-weight: normal">assign </SPAN>the function an
+existing <B>IAM execution role </B>or create a new role with default
+permissions.</FONT></FONT></P>
+<BR>
+<P STYLE="margin-bottom: 0in"><IMG SRC="whitepaper_async_html_m5d91ee1c.jpg" NAME="graphics4" ALIGN=LEFT WIDTH=636 HEIGHT=222 BORDER=0><BR CLEAR=LEFT><BR>
+</P>
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">In
+either case the ability to call one function from another is not
+included by default.  In the IAM console click the role attached to
+the new function, <B>Add Permissions | Create Inline Policy</B>,
+select the <B>JSON</B> tab, and add the block below:</FONT></FONT></P>
+<BR>
+
+<div style="background-color:#cfe7f5">
+<P STYLE="margin-bottom: 0in; background: #cfe7f5"><FONT COLOR="#000000"><SPAN STYLE="background: #cfe7f5">
+<FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">		{</SPAN></FONT></FONT></FONT></P>
+
+<P STYLE="margin-left: 1in; background: #cfe7f5"><FONT COLOR="#000000"><SPAN STYLE="background: transparent">
+           <FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">&quot;Sid&quot;:
+&quot;LambdaCallsLambda&quot;,</SPAN></FONT></FONT></FONT>
+<P STYLE="margin-left:1in; background: #cfe7f5"><FONT COLOR="#000000"><SPAN STYLE="background: transparent">
+           <FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">&quot;Effect&quot;:
+&quot;Allow&quot;,</SPAN></FONT></FONT></FONT>
+<P STYLE="margin-left: 1in; background: #cfe7f5"><FONT COLOR="#000000"><SPAN STYLE="background: transparent">
+           <FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">&quot;Action&quot;:
+&quot;lambda:InvokeFunction&quot;,</SPAN></FONT></FONT></FONT>
+<P STYLE="margin-left: 1in; background: #cfe7f5"><FONT COLOR="#000000"><SPAN STYLE="background: transparent">
+           <FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">&quot;Resource&quot;:
+&quot;*&quot;</SPAN></FONT></FONT></FONT>
+<P STYLE="margin-bottom: 0in; background: #cfe7f5"><FONT COLOR="#000000"><SPAN STYLE="background: transparent">
+           <FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">},</SPAN></FONT></FONT></FONT></P>
+</div>
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2>*
+'Sid' is an optional user-generated identifier for the policy </FONT></FONT>
+</P>
+
+
+<BR>
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">The
+entry-point for each helper lambda function will be its 
+<FONT FACE="Courier New, monospace"><SPAN STYLE="font-weight: normal"><SPAN STYLE="background: #cfe7f5">lambda_handler(event,
+context)</SPAN></SPAN></FONT><FONT FACE="Courier New, monospace"><SPAN STYLE="font-weight: normal">
+</SPAN></FONT>function.  The <B>event</B> parameter will contain the
+data passed from the calling function in the main file.</FONT></FONT></P>
+<BR>
+<BR>
+
+<FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>notifyUsers.py</B></FONT></FONT>
+<div style="background-color:#cfe7f5">
+<P STYLE="margin-left: 0in; background: #cfe7f5"><FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">def
+lambda_handler(event, context):</FONT></FONT></P>
+<P STYLE="margin-left: 1in; background: #cfe7f5">    
+</P>
+<P STYLE="margin-left: 1in; background: #cfe7f5"><FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">	leed_id
+= event['id']</FONT></FONT></P>
+<P STYLE="margin-left: 1in; background: #cfe7f5"><FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">	trade_name
+= event['trade']</FONT></FONT></P>
+<P STYLE="margin-left: 1in; background: #cfe7f5"><FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">	seller
+=  event['seller']</FONT></FONT></P>
+<P STYLE="margin-left: 1in; background: #cfe7f5"><FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">	#
+. . . remainder of function . . .</FONT></FONT></P>
+</div>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">Complete
+the subroutine code and any helper functions it relies upon in the
+Lambda's <B>Code</B> section and <B>Deploy</B> the function.  Best
+practice dictates creating a <B>Test</B> right away to ensure that if
+(when) it doesn't work later on, you can more quickly track down the problem in the
+caller.</FONT></FONT></P>
+
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">In
+the calling Lambda, change the synchronous function calls to a new
+format that uses the <B>boto3 </B><SPAN STYLE="font-weight: normal">SDK</SPAN>
+to broker messaging between Lambdas in different files.  The <B>Payload</B>
+is the application-level dictionary you define with the data the
+helper requires. It becomes the <B>event</B><SPAN STYLE="font-weight: normal">
+parameter of the helper function's lambda_handler above.</SPAN></FONT></FONT></P>
+
+
+<BR>
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>addLeed.py</B></FONT></FONT>
+
+<div style="background-color:#cfe7f5">
+        <P STYLE="margin-bottom: 0in; background: #cfe7f5"> <FONT FACE="Courier New, monospace"><FONT SIZE=2><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="font-weight: normal">	
+        func_args = {</SPAN></FONT></FONT></FONT></P>
+        <P STYLE="margin-left: 1in; >background: #cfe7f5; font-weight: normal">
+                <FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">	'id':'123456789',</FONT></FONT></P>
+        <P STYLE="margin-left: 1in; background: #cfe7f5; font-weight: normal">
+        <FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">		
+                'trade':'caricatures',</FONT></FONT></P>
+        <P STYLE="margin-left: 1in; background: #cfe7f5; font-weight: normal">
+        <FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">			'seller':'scott.gross'</FONT></FONT></P>
+        <P STYLE="margin-left: 1in; background: #cfe7f5; font-weight: normal">
+                <FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">}</FONT></FONT></P>
+        <P STYLE="margin-bottom: 0in; background: #cfe7f5; font-weight: normal">
+                <FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">lambda_function
+        = boto3.client('lambda')</FONT></FONT></P>
+        <P STYLE="margin-bottom: 0in; background: #cfe7f5; font-weight: normal">
+                <FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">lambda_function.invoke(
+        FunctionName='notifyUsers',</FONT></FONT></P>
+        <P STYLE="margin-left: 2.2in; background: #cfe7f5; font-weight: normal">
+                                        <FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">InvocationType='Event',</FONT></FONT></P>
+        <P STYLE="margin-left: 2.2in; background: #cfe7f5; font-weight: normal">
+                                        <FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">Payload=
+        json.dumps( func_args ))</FONT></FONT></P>
+</div>
+
+
+<BR>
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">The
+<B>Invocation-type</B> flag is set to <B>'Event'</B>.  This instructs
+AWS to execute the function asynchronously, send the payload through
+the event parameter, and return immediately.  To call a function
+defined in another file <B>synchronously</B> and wait for the return
+value, use  the same code block with
+<FONT FACE="Courier New, monospace"><SPAN STYLE="font-weight: normal"><SPAN STYLE="background: #cfe7f5">InvocationType='RequestResponse'	</SPAN></SPAN></FONT></FONT></FONT></P>
+
+<BR>
+
+
+
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=3><B>From
+Spider to Controller</B></FONT></FONT></P>
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">The
+code now looks like a spider with the main controller in the middle
+calling subroutines on its arms.  The problem emerges that each
+subroutine relies on its own utility functions to process the DB
+output, pretty-format dates, concatenate strings, format emails,
+generate HTML and communicate with other AWS services.  Often this
+utility code must be duplicated across files or separated into yet
+more helper lambda functions.</FONT></FONT></P>
+<BR>
+<P STYLE="margin-bottom: 0in"><IMG SRC="whitepaper_async_html_52df5fae.jpg" NAME="graphics5" ALIGN=LEFT WIDTH=665 HEIGHT=374 BORDER=0><BR CLEAR=LEFT><BR>
+</P>
+<BR>
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">Each
+call to  <FONT FACE="Courier New, monospace"><SPAN STYLE="background: #cfe7f5">lambda_function.invoke()</SPAN></FONT>
+ involves marshaling and unmarshaling the same data to and from JSON
+over and over, much of it unused by the helper function.  Multiple
+redundancies and code duplication frustrate testing and inevitably
+cause bugs.  The legs of the spider end up weighing more than the
+body.</FONT></FONT></P>
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">A
+better solution is to concentrate the shared utility functions and
+handles to other infrastructure services in a handful of <B>asynchronous
+controller functions</B>.  The controllers delegate tasks to
+different subroutines in their same scope using a grand <B>match</B>
+statement in the main lambda_handler and the 'function' parameter of
+the <B>Payload</B> to determine which function to call.</FONT></FONT></P>
+<BR>
+
+
+        
+        <P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>addLeed.py
+                (main branch)</B></FONT>
+
+<div style="background-color:#cfe7f5">
+
+        <P STYLE="margin-bottom: 0in; background: #cfe7f5"><FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">		payload
+        = {</FONT></FONT></P>
+        <P STYLE="margin-left: 1in; background: #cfe7f5"><FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">			'function':'notifyUsers',</FONT></FONT></P>
+        <P STYLE="margin-left: 1in; background: #cfe7f5"><FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">			'id':
+        '123456789',</FONT></FONT></P>
+        <P STYLE="margin-left: 1in; background: #cfe7f5"><FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">			'trade':
+        'caricatures',</FONT></FONT></P>
+        <P STYLE="margin-left: 1in; background: #cfe7f5"><FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">			'seller':
+        'scott.gross'</FONT></FONT></P>
+        <P STYLE="margin-left: 1in; background: #cfe7f5"><FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">		}</FONT></FONT></P>
+        <P STYLE="margin-left: 0in; background: #cfe7f5"><FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">		lambda_function
+        = boto3.client('lambda')</FONT></FONT></P>
+        <P STYLE="margin-left: 0in; background: #cfe7f5">          
+        <FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">lambda_function.invoke(FunctionName='async_email_helper',</FONT></FONT></P>
+        <P STYLE="margin-left: 2.1in; background: #cfe7f5">                  
+                <FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">InvocationType='Event',</FONT></FONT></P>
+        <P STYLE="margin-left: 2.1in; background: #cfe7f5">                  
+                <FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">Payload=
+        json.dumps( payload ))</FONT></FONT></P>
+
+</div>
+
+<BR>
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>async_email_helper.py
+ (controller)</B></FONT></FONT></P>
+
+ 
+<div style="background-color:#cfe7f5">
+
+        <P STYLE="margin-bottom: 0in; background: #cfe7f5"><FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">def
+        lambda_handler(event, context):</FONT></FONT></P>
+
+        <P STYLE="margin-left: 1in; background: #cfe7f5">       
+        <FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">function_name
+        = event['function']</FONT></FONT></P>
+        <P STYLE="margin-left: 1in; background: #cfe7f5">        <FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">match
+        function_name:</FONT></FONT></P>
+ 
+        <P STYLE="margin-left: 1.5in; background: #cfe7f5">            <FONT FACE="Courier New, monospace"><FONT SIZE=2 STYLE="font-size: 11pt">case
+        'notifyUsers':</FONT></FONT></P>
+
+        <P STYLE="margin-left: 2in; background: #cfe7f5"><FONT FACE="Courier New, monospace" SIZE=2 STYLE="font-size: 11pt">
+                leed_id = event['id']</FONT></FONT></P>
+
+        <P STYLE="margin-left: 2in; background: #cfe7f5"><FONT FACE="Courier New, monospace" SIZE=2 STYLE="font-size: 11pt">
+                trade = event['trade']</FONT></FONT></P>
+
+        <P STYLE="margin-left: 2in; background: #cfe7f5"><FONT FACE="Courier New, monospace" SIZE=2 STYLE="font-size: 11pt">
+                seller = event['seller']</FONT></FONT></P>
+
+        <P STYLE="margin-left: 2in; background: #cfe7f5"><FONT FACE="Courier New, monospace" SIZE=2 STYLE="font-size: 11pt">
+                notifyUsers(leed_id, trade, seller)</FONT></FONT></P>
+
+                <P STYLE="margin-left: 1.5in; background: #cfe7f5"><FONT FACE="Courier New, monospace" SIZE=2 STYLE="font-size: 11pt">
+                        # match function_name to other subroutines below</FONT></FONT></P>
+        <BR>
+
+</div>
+
+<BR>
+<P STYLE="margin-bottom: 0in"><IMG SRC="whitepaper_async_html_5fe5afb0.jpg" NAME="graphics6" ALIGN=LEFT WIDTH=646 HEIGHT=363 BORDER=0><BR CLEAR=LEFT><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="font-weight: normal">The
+lambda_handler() inside addLeed.py calls the </SPAN>controllers
+asynchronously.  Each call returns immediately to the main branch,
+but sends an <B>Event</B> to the helper which processes the request
+using whatever resources are required.  This may include calling
+another handler synchronously and waiting for return data before
+completing its task.</FONT></FONT></P>
+
+<BR>
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">This
+design centralizes the utility functions required to compose emails
+and HTML in one file where they can be more easily debugged.  The
+code for marshalling and unmarshalling JSON need not be repeated as
+data can be passed to the subroutines in function arguments.  The
+main Lambda function can offload 3<SUP>rd</SUP> party API calls and
+time-intensive processing tasks to asynchronous helpers without
+waiting for their completion so long as each subroutine does not
+depend on another for its input.  They may execute in parallel or
+even after the client app has received its response.  </FONT></FONT>
+</P>
+<BR>
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=3 STYLE="font-size: 13pt"><B>Conclusion</B></FONT></FONT>
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">As
+an AWS app grows and adds more services, a distinction arises between
+request-response functions for which the user can be expected to
+wait, and those which occur in the background on their own time.  The
+<B>Asynchronous Invocation Pattern</B><FONT COLOR="#336633"><I> </I></FONT><FONT COLOR="#003300"><I>with
+controllers</I></FONT><FONT COLOR="#336633"><I> </I></FONT>aligns
+with best practices for AWS Lambda functions.  It allows for
+efficient utilization of resources and enables parallel processing of
+tasks.  Functional code separation promotes modularity, which eases
+testing and debugging.  This design pattern is well-supported by AWS
+and integrates with various infrastructure SaaS like    Amazon
+Cognito, Location, SMS Notification and Email.  It is one way in
+which the Leedz puts the user experience first.</FONT></FONT></P>
+<BR>
+        
+<center>
+<IMG SRC="whitepaper_async_html_4cbe14f1.jpg" NAME="graphics7"  WIDTH=307 HEIGHT=307 BORDER=0>
+</center>
+<BR>
+<BR>
+<BR>
+<BR>
+                
+</TD></TR>
+</TABLE>
+
+
+        <div class="row" style="padding:16px; background-color: darkgreen; color:white; font-size:0.8em; font-family:'Arial'"">
+                <span style="margin-left:10vw">
+                All content is &copy;2024 The Leedz, all rights reserved, and may not be reproduced for 
+                commercial purposes without written permission.
+                </span>
+            </div>
+
+</BODY>
+</HTML>

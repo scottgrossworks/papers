@@ -1,0 +1,925 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN">
+<HTML>
+<HEAD>
+	<META HTTP-EQUIV="CONTENT-TYPE" CONTENT="text/html; charset=windows-1252">
+	<TITLE>Optimize Your Web App with API Gateway Direct Integration</TITLE>
+
+
+    <meta name="description" content="A whitepaper entitled Optimizing 
+	Your Web App with API Gateway Direct Integration">
+	
+    <meta name="keywords" content="aws, awsprogramming, serverless, saas, amazon web services, python, pythonprogramming, asynchronous, The Leedz, leedz, leads, lead generation, sales leads, parties, events, event production, talent, event planner, 
+    event planning, wedding planning, wedding planner, weddings, quincineara, bookings, crm, catering, service providers, thumbtack, gigsalad, gigs, gig economy, vendors, marketing, 
+    small business, sales, leads, parties">
+	
+	<meta name="author" content="Scott Gross">
+
+
+
+	</HEAD>
+
+
+
+
+<BODY LANG="en-US" DIR="LTR">
+<TABLE style="width:80vw;margin:0 auto; line-height: 110%"">
+        <TR><TD>
+
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">
+	May, 2024
+
+	<BR>
+	<BR>
+
+<P ALIGN=CENTER STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=4 STYLE="font-size: 15pt"><B>Optimize
+Your Web App with API Gateway Direct Integration</B></FONT></FONT></P>
+
+<BR>
+	<BR>
+	
+
+<P ALIGN=LEFT STYLE="margin-bottom: 0in">
+<FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">Scott Gross
+<BR>
+<FONT COLOR="#007826"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>theleedz.com</B>
+</FONT></FONT></FONT>
+
+<BR>
+<BR>
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=3><B>Overview</B></FONT></FONT>
+<BR>
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="font-weight: normal">The
+front page of</SPAN><B> theleedz.com</B> combines static html and
+images with javascript elements served by an HTTP request to <B>AWS
+API Gateway.</B>  The return data populates several <SPAN STYLE="font-weight: normal">stats</SPAN>
+windows which show among other things, the most recent leedz posted
+and sold.  In the original<SPAN STYLE="font-weight: normal">
+/getStats</SPAN><B> </B>implementation the round-trip took about four
+seconds.  The culprit was the python Lambda function, which had to be
+started cold on each (sadly infrequent) hit to the website.  This
+paper shows how to skip the Lambda function and pass a GetItem
+request directly from API Gateway to DynamoDB, an approach called
+<B>Direct Integration.</B></FONT></FONT>
+<BR>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>The
+Problem</B></FONT></FONT>
+<BR>
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="font-weight: normal">The
+most common approach to building AWS apps involves integrating API
+Gateway with Lambda functions containing your business logic and
+other services. The Leedz API works that way.  The original /</SPAN><B>getStats</B><SPAN STYLE="font-weight: normal">
+would spin up a python instance and run a Lambda function, use boto3
+to connect to DynamoDB and perform a single </SPAN><B>GetItem</B><SPAN STYLE="font-weight: normal">.
+ The resulting key-value pairs, </SPAN>about 200 characters of JSON,
+are passed back to the client without further formatting.  This
+process was taking about four seconds end-to-end because the website
+gets infrequent traffic and python is always starting up cold.</FONT></FONT>
+<BR>
+<BR>
+
+	<div style="font-size:9pt;padding-left:40px; background-color:#cfe7f5">
+	<code style="font-size:9pt">
+<BR>
+		def Lambda_handler(event, context):
+<BR>
+	<span style="padding-left:40px"></span>dynamodb_client = boto3.resource("dynamodb")
+<BR>
+    <span style="padding-left:40px"></span>table = dynamodb_client.Table('DATABASE NAME')
+<BR>
+    <span style="padding-left:40px"></span>pk = 'PRIMARY KEY'
+<BR>
+	<span style="padding-left:40px"></span>sk = 'SORT KEY'
+<BR>
+    <span style="padding-left:40px"></span> response = table.get_item(
+<BR>
+	<span style="padding-left:80px"></span>Key={'pk': pk, 'sk': sk}
+<BR>
+	<span style="padding-left:80px"></span>)
+<BR>      
+    <span style="padding-left:40px"></span>result = json.dumps( response['Item'], cls=DecimalJsonEncoder)
+<BR>
+	<span style="padding-left:40px"></span>return createHttpResponse( result )
+<BR>
+<BR>
+</code>
+</div>
+<BR>
+
+
+<P STYLE="margin-bottom: 0in; font-weight: normal"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">I
+explored various caching and timeout strategies but none were
+satisfactory.  The performance problem wasn't the static html or
+images, but the stats values which could be changed at any time and
+needed to be queried fresh.  Even if I integrated a serverless cache
+for this one row of data, and redirected my client or API Gateway to
+it, the cache would have to be updated every time an even occurred in
+the system &ndash; which meant rewriting a lot of simple, working
+code.</FONT></FONT>
+<BR>
+<BR>
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>Direct
+Integration</B></FONT></FONT>
+<BR>
+
+<P STYLE="margin-bottom: 0in; font-weight: normal"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">The
+solution for the Leedz is a <B>Direct Integration</B> between API
+Gateway and DynamoDB without the need for a Lambda function.  Because
+<B>getStats.py </B>is not doing any business logic or data
+formatting, the DB request and response handling can all be specified
+using templates in the AWS Console GUI.  AWS supports this
+<B>Infrastructure as Code</B> to link resources together using
+configuration tools and JSON files instead of custom glue code. No
+new python process is started, and the request/response are not
+marshaled back and forth between APIs.  The result is a much faster
+round-trip. </FONT></FONT>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in"><IMG SRC="whitepaper_direct_html_m2bf675a.jpg" NAME="graphics1" ALIGN=LEFT WIDTH=657 HEIGHT=284 BORDER=0><BR CLEAR=LEFT><BR>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>How
+I Did It</B></FONT></FONT>
+<BR>
+
+<P STYLE="margin-bottom: 0in; background: transparent; font-weight: normal">
+<FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: transparent">Below
+is an outline of the steps I followed to directly integrate my
+/getStats and /getTrades functions.  Your needs may differ, but the
+steps below should remain the same whether you're getting or putting
+data.  AWS makes it easy to experiment, and if you get cold feet at
+any time you can quickly delete everything and start over.</SPAN></FONT></FONT>
+<BR>
+
+<OL style="margin-left:30px;width:50%; background-color:#cfe7f5">
+	<BR>
+	<LI><P STYLE="margin-bottom: 0in; line-height: 150%"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B><SPAN STYLE="background: transparent">Create New
+	IAM Policy</SPAN></B></FONT></FONT>
+	<LI><P STYLE="margin-bottom: 0in; line-height: 150%"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B><SPAN STYLE="background: transparent">Attach
+	IAM Role to Policy</SPAN></B></FONT></FONT>
+	<LI><P STYLE="margin-bottom: 0in; line-height: 150%"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B><SPAN STYLE="background: transparent">Create
+	REST API</SPAN></B></FONT></FONT>
+	<OL>
+		<P STYLE="margin-bottom: 0in; line-height: 150%"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B><SPAN STYLE="background: transparent">Integrate
+		Request</SPAN></B></FONT></FONT>
+		<P STYLE="margin-bottom: 0in; line-height: 150%"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B><SPAN STYLE="background: transparent">Integrate
+		Response</SPAN></B></FONT></FONT>
+	</OL>
+	<LI><P STYLE="margin-bottom: 0in; line-height: 150%"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B><SPAN STYLE="background: transparent">Deploy
+	and Test
+	</SPAN></B></FONT></FONT>
+	<BR><BR>
+</OL>
+<BR>
+
+
+
+<P STYLE="margin-bottom: 0in"><SPAN STYLE="background: #cfe7f5"> <FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>1.
+ New IAM Policy </SPAN></B></FONT></FONT>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in; font-weight: normal"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: #ffffff">Create
+a new IAM Policy that authorizes the connection to DynamoDB and the
+specific operation being performed.</SPAN></FONT></FONT>
+<BR>
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="font-weight: normal">Go
+to your </SPAN><B>IAM Dashboard &rarr; Create Policy.  </B><SPAN STYLE="font-weight: normal">
+ </SPAN></FONT></FONT>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in"><IMG SRC="whitepaper_direct_html_29312f6c.jpg" NAME="graphics2" ALIGN=LEFT WIDTH=657 HEIGHT=254 BORDER=0><BR CLEAR=LEFT>
+	
+
+<BR>
+
+<P STYLE="margin-bottom: 0in; font-weight: normal"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">Enter
+'dynamoDB' in the search window or choose from the list.  In the
+<B>Actions Allowed</B> enter 'get' and select the <B>GetItem</B>
+checkbox or whatever DB actions your app requires.  Click  <B>Add
+ARNs</B> to connect the policy to your specific DB table.  Find the
+table ARN at</FONT></FONT>
+<BR>
+
+<P STYLE="margin-bottom: 0in; font-weight: normal"> 
+
+<P ALIGN=CENTER STYLE="margin-bottom: 0in; font-weight: normal">
+<FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>DynamoDB
+&rarr; your table &rarr; General Information &rarr; Additional Info</B></FONT></FONT>
+<BR>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in; font-weight: normal"><IMG SRC="whitepaper_direct_html_m9e5f16e.jpg" NAME="graphics3" ALIGN=LEFT WIDTH=654 HEIGHT=283 BORDER=0>
+	
+	<BR CLEAR=LEFT>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in; font-weight: normal"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">Restrict
+the resources to your database ARN.  Add more permissions if
+required.  Then click <B>Next.  </B>On the next screen you can review
+all the Resources in the policy and the actions permitted.  Give the
+policy a name and description and <B>Create Policy</B></FONT></FONT>
+<BR>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in"><IMG SRC="whitepaper_direct_html_1aa23cd9.jpg" NAME="graphics4" ALIGN=LEFT WIDTH=654 HEIGHT=249 BORDER=0>
+	
+<BR CLEAR=LEFT>
+
+
+<BR>
+
+<P STYLE="margin-bottom: 0in"><SPAN STYLE="background: #cfe7f5"> <FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>2.
+ Attach IAM Role to Policy </SPAN></B></FONT></FONT>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: #ffffff"><SPAN STYLE="font-weight: normal">In
+the left-column of the </SPAN><B>IAM </B><SPAN STYLE="font-weight: normal">main
+console, click </SPAN><B>Roles.  </B><SPAN STYLE="font-weight: normal">Create
+a </SPAN><B>Role</B><SPAN STYLE="font-weight: normal">.  Enter 'API
+Gateway' in the </SPAN><B>Service or use case </B><SPAN STYLE="font-weight: normal">dialog.
+ Click </SPAN><B>Next.</B><SPAN STYLE="font-weight: normal">  You'll
+see that </SPAN><B>AmazonAPIGatewayPushToCloudWatchLogs</B><SPAN STYLE="font-weight: normal">
+is attached to the role by default.  Click </SPAN><B>Create Role.</B></SPAN></FONT></FONT>
+<BR>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in; font-weight: normal"><IMG SRC="whitepaper_direct_html_m4729766b.jpg" NAME="graphics5" ALIGN=LEFT WIDTH=658 HEIGHT=285 BORDER=0><BR CLEAR=LEFT><BR>
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: #ffffff"><SPAN STYLE="font-weight: normal">We
+still need to attach the new </SPAN><B>Policy</B><SPAN STYLE="font-weight: normal">
+we just created with the DB integration to the new </SPAN><B>Role</B><SPAN STYLE="font-weight: normal">.
+ </SPAN></SPAN></FONT></FONT>
+
+<P STYLE="margin-bottom: 0in; font-weight: normal"><IMG SRC="whitepaper_direct_html_26dae80e.jpg" NAME="graphics6" ALIGN=LEFT WIDTH=660 HEIGHT=151 BORDER=0>
+	
+	<BR CLEAR=LEFT>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">
+	<SPAN STYLE="background: #ffffff"><SPAN STYLE="font-weight: normal">Click
+</SPAN><B>Add Permissions &rarr; Attach policies.  </B><SPAN STYLE="font-weight: normal">Find
+the new policy in the dropdown.  It's </SPAN><B>Type</B><SPAN STYLE="font-weight: normal">
+is 'Customer managed' and not 'AWS managed' so you can sort the list
+and find it quickly.   On the </SPAN><B>Summary </B><SPAN STYLE="font-weight: normal">page
+you'll see the new Policy attached to the Role.</SPAN></SPAN></FONT></FONT>
+<P STYLE="margin-bottom: 0in; font-weight: normal"><IMG SRC="whitepaper_direct_html_47afe7cb.jpg" NAME="graphics7" ALIGN=LEFT WIDTH=657 HEIGHT=156 BORDER=0><BR CLEAR=LEFT>
+	
+	<BR>
+
+
+
+<P STYLE="margin-bottom: 0in"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">
+	<SPAN STYLE="background: #ffffff"><SPAN STYLE="font-weight: normal">
+		Copy
+the </SPAN><B>Role ARN </B><SPAN STYLE="font-weight: normal">from the
+Summary section for use in the next step.</SPAN></SPAN></FONT></FONT>
+<BR>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in"><SPAN STYLE="background: #ffffff"><SPAN STYLE="background: #cfe7f5">
+<FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>3.
+Create REST API </SPAN></B><SPAN STYLE="font-weight: normal"><SPAN STYLE="background: #cfe7f5">
+</SPAN></SPAN></SPAN></FONT></FONT>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: #ffffff"><SPAN STYLE="font-weight: normal">This
+step is key.  There are two types of APIs in API Gateway: </SPAN><B>REST
+and HTTP </B><SPAN STYLE="font-weight: normal">.  REST supports
+Direct Integration with DynamoDB &ndash; HTTP does not.  So you'll
+need to create a REST API just for the new direct calls.  The
+client-side Javascript will send an HTTP request the same as before,
+just to a different endpoint.  Go to the </SPAN><B>API Gateway
+</B><SPAN STYLE="font-weight: normal">console and click </SPAN></SPAN></FONT></FONT>
+
+<BR>
+
+<P ALIGN=CENTER STYLE="margin-bottom: 0in; background: #ffffff"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B><SPAN STYLE="background: #ffffff">Create
+API</SPAN></B><SPAN STYLE="font-weight: normal"><SPAN STYLE="background: #ffffff">
+&rarr; </SPAN></SPAN><SPAN STYLE="background: #ffffff"><B>REST API &rarr;
+BUILD</B></SPAN></FONT></FONT>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+	
+<FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: #ffffff">In
+the next dialog with the <B>New API </B>radio button selected, click
+<B>Create API</B>.  Then <B>Create resource. </B> </SPAN></FONT></FONT>
+
+<BR>
+<BR>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<IMG SRC="whitepaper_direct_html_1e5362aa.jpg" NAME="graphics11" ALIGN=LEFT WIDTH=657 HEIGHT=150 BORDER=0><BR CLEAR=LEFT><BR>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: #ffffff">In
+the <B>Resource details</B>, deselect 'Proxy resource', choose a path
+name for the new function, and click ON the <B>CORS</B> checkbox. 
+
+
+<BR>
+
+Click <B>Create resource</B> to add this path to the API.</SPAN></FONT></FONT>
+
+	<BR>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<IMG SRC="whitepaper_direct_html_m44862069.jpg" NAME="graphics9" ALIGN=LEFT WIDTH=651 HEIGHT=181 BORDER=0><BR CLEAR=LEFT><BR>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: #ffffff">Next,
+configure the new API to accept HTTP GET requests for /<B>statsDirect</B>,
+like the original API did for /<B>getStats</B>,  Click <B>Create
+Method</B>.  </SPAN></FONT></FONT>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<IMG SRC="whitepaper_direct_html_m2d46f14b.jpg" NAME="graphics10" ALIGN=LEFT WIDTH=655 HEIGHT=156 BORDER=0><BR CLEAR=LEFT><BR>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: #ffffff">On
+the <B>Method Details</B> screen integrate the API Gateway <B>GET</B>
+method with the DynamoDB <B>GetItem</B>, just like in the Lambda
+function.  Use your own <B>AWS Region </B> and copy the <B>Role ARN
+</B>from above into the <B>Execution role</B>.  The other values are
+essential, especially <B>POST</B> for the HTTP method (to DyanmoDB).</SPAN></FONT></FONT>
+
+
+<BR>
+
+	<BR>
+
+<DL>
+	<DL>
+		<DL>
+			<DL>
+				<DD>
+				<TABLE WIDTH=375 BORDER=1 BORDERCOLOR="#000000" CELLPADDING=4 CELLSPACING=0>
+					<COL WIDTH=171>
+					<COL WIDTH=186>
+					<TR VALIGN=TOP>
+						<TD WIDTH=171 BGCOLOR="#cfe7f5">
+							<P><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>Method
+							type</B></FONT></FONT>
+						</TD>
+						<TD WIDTH=186 BGCOLOR="#cfe7f5">
+							<P><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">GET</FONT></FONT>
+						</TD>
+					</TR>
+					<TR VALIGN=TOP>
+						<TD WIDTH=171 BGCOLOR="#cfe7f5">
+							<P><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>Integration
+							type</B></FONT></FONT>
+						</TD>
+						<TD WIDTH=186 BGCOLOR="#cfe7f5">
+							<P><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">AWS
+							Service</FONT></FONT>
+						</TD>
+					</TR>
+					<TR VALIGN=TOP>
+						<TD WIDTH=171 BGCOLOR="#cfe7f5">
+							<P><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>AWS
+							Region</B></FONT></FONT>
+						</TD>
+						<TD WIDTH=186 BGCOLOR="#cfe7f5">
+							<P><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">&lt;&lt;
+							use your region &gt;&gt;</FONT></FONT>
+						</TD>
+					</TR>
+					<TR VALIGN=TOP>
+						<TD WIDTH=171 BGCOLOR="#cfe7f5">
+							<P><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>AWS
+							Service</B></FONT></FONT>
+						</TD>
+						<TD WIDTH=186 BGCOLOR="#cfe7f5">
+							<P><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">DynamoDB</FONT></FONT>
+						</TD>
+					</TR>
+					<TR VALIGN=TOP>
+						<TD WIDTH=171 BGCOLOR="#cfe7f5">
+							<P><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>HTTP
+							method</B></FONT></FONT>
+						</TD>
+						<TD WIDTH=186 BGCOLOR="#cfe7f5">
+							<P><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">POST</FONT></FONT>
+						</TD>
+					</TR>
+					<TR VALIGN=TOP>
+						<TD WIDTH=171 BGCOLOR="#cfe7f5">
+							<P><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>Action
+							type</B></FONT></FONT>
+						</TD>
+						<TD WIDTH=186 BGCOLOR="#cfe7f5">
+							<P><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">Use
+							action name</FONT></FONT>
+						</TD>
+					</TR>
+					<TR VALIGN=TOP>
+						<TD WIDTH=171 BGCOLOR="#cfe7f5">
+							<P><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>Action
+							name</B></FONT></FONT>
+						</TD>
+						<TD WIDTH=186 BGCOLOR="#cfe7f5">
+							<P><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">GetItem</FONT></FONT>
+						</TD>
+					</TR>
+					<TR VALIGN=TOP>
+						<TD WIDTH=171 BGCOLOR="#cfe7f5">
+							<P><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>Execution
+							role</B></FONT></FONT>
+						</TD>
+						<TD WIDTH=186 BGCOLOR="#cfe7f5">
+							<P><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">&lt;&lt;
+							use Role ARN &gt;&gt;</FONT></FONT>
+						</TD>
+					</TR>
+				</TABLE>
+			</DL>
+		</DL>
+	</DL>
+</DL>
+
+
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<BR>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<IMG SRC="whitepaper_direct_html_255f83cc.jpg" NAME="graphics8" ALIGN=LEFT WIDTH=656 HEIGHT=110 BORDER=0><BR CLEAR=LEFT><BR>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: #ffffff">Click
+<B>Create method</B> and go back to the method configuration page. 
+You'll now see console options for :</SPAN></FONT></FONT>
+<BR>
+
+	<FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt">
+	<B>
+		<ul type=0>
+		<li>Method request</li>
+		<li>Integration request</li>
+		<li>Method response</li>
+		<li>Integration response</li>    
+		</ul>
+</B> </FONT></FONT>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff"><SPAN STYLE="background: #ff9900">
+<FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>Integration
+Request </SPAN></B></FONT></FONT>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: #ffffff">Set
+<B>Content handling </B>to <B>Passthrough</B>.  <B>Request body
+passthrough </B>should be set to <B>Never</B> so that the raw HTTP
+request body won't get passed to DynamoDB.  </SPAN></FONT></FONT>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: #ffffff">Instead
+we will use <B>Mapping Templates</B> to handle the transformation of
+the request and response data between API Gateway and the DB.</SPAN></FONT></FONT>
+
+<BR>
+<BR>
+
+<IMG SRC="whitepaper_direct_html_593ac6f5.gif" NAME="graphics12" ALIGN=LEFT WIDTH=656 HEIGHT=245 BORDER=0><BR CLEAR=LEFT><BR>
+
+<BR>
+
+<FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: #ffffff">At
+the bottom of the screen, add a <B>Mapping Template.</B> </SPAN></FONT></FONT>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<IMG SRC="whitepaper_direct_html_47d8937.gif" NAME="graphics15" ALIGN=LEFT WIDTH=660 HEIGHT=126 BORDER=0><BR CLEAR=LEFT><BR>
+
+
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: #ffffff">The
+<B>Content type</B> is <B>application/json.</B>  Generate an <B>Empty</B>
+template and copy the JSON below into the <B>Template body.  </B>This
+is <B>Infrastructure as Code</B>, the actual DB request formalized in
+JSON instead of a Lambda function.  </SPAN></FONT></FONT>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff"><BR>
+
+
+
+		<div style="padding-left:10px; background-color:#cfe7f5">
+<CODE>
+	<BR>
+	{
+		<BR>
+			<span style="padding-left:20px"></span>"TableName": "<< your DB table name >>",
+		<BR>
+			<span style="padding-left:20px"></span>"Key": {
+		<BR>
+			<span style="padding-left:30px"></span>"pk": {
+		<BR>
+			<span style="padding-left:40px"></span>"S": "<< PRIMARY KEY >>"
+		<BR>
+			<span style="padding-left:30px"></span>},
+		<BR>
+			<span style="padding-left:30px"></span>"sk": {
+		<BR>
+			<span style="padding-left:40px"></span>"S": "<< SORT KEY >>"
+		<BR>  
+			<span style="padding-left:30px"></span>}
+		<BR>	
+			<span style="padding-left:15px"></span>}
+	  	<BR>
+		}
+		<BR>
+		<BR>
+</CODE>
+</div>
+</div>
+
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: #ffffff">Your
+JSON will vary depending on request type, i.e. a Scan or Query
+instead of a GetItem.</SPAN></FONT></FONT>
+<BR>
+<BR>
+
+	
+<FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="font-weight: normal"><SPAN STYLE="background: #ffffff">Below
+is the JSON for another Mapping Template defining a DynamoDB </SPAN></SPAN></FONT></FONT><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B><SPAN STYLE="background: #ffffff">Query
+</SPAN></B></FONT></FONT><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="font-weight: normal"><SPAN STYLE="background: #ffffff">for
+all items whose </SPAN></SPAN></FONT></FONT><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B><SPAN STYLE="background: #ffffff">primary
+key 'pk' </SPAN></B></FONT></FONT><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="font-weight: normal"><SPAN STYLE="background: #ffffff">has
+the value '</SPAN></SPAN></FONT></FONT><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B><SPAN STYLE="background: #ffffff">trade'</SPAN></B></FONT></FONT><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="font-weight: normal"><SPAN STYLE="background: #ffffff">.</SPAN></SPAN></FONT></FONT>
+
+<BR>
+<BR>
+
+
+
+<div style="padding-left:10px; background-color:#cfe7f5">
+<CODE>
+	<BR>
+	{
+		<BR>
+			<span style="padding-left:20px"></span>"TableName": "Leedz_DB",
+		<BR>
+			<span style="padding-left:20px"></span>"KeyConditionExpression": "pk = :v1",
+		<BR>
+			<span style="padding-left:20px"></span>"ExpressionAttributeValues": 
+		<BR>
+			<span style="padding-left:30px"></span>":v1": {
+		<BR>
+			<span style="padding-left:45px"></span>"S": "trade"
+		<BR>
+			<span style="padding-left:30px"></span>}
+		<BR>
+			<span style="padding-left:20px"></span>},
+		<BR>  
+			<span style="padding-left:20px"></span>"ScanIndexForward": false
+		<BR>	
+		}
+		<BR>
+		<BR>
+
+
+</CODE>
+</div>
+
+
+<BR>
+<BR>
+
+
+	<FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B><SPAN STYLE="background: #ff9900"><BR>
+Integration Response </SPAN></B></FONT></FONT>
+<BR>
+<BR>
+	
+<FONT COLOR="#000000"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: transparent">Back
+on the main <B>Resources</B> console, with the radio button for your
+<B>GET </B>method selected, click <B>Enable CORS </B>to get a pop-up
+dialog.</SPAN></FONT></FONT></FONT>
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<IMG SRC="whitepaper_direct_html_m2fe8d38f.jpg" NAME="graphics13" ALIGN=LEFT WIDTH=657 HEIGHT=216 BORDER=0><BR CLEAR=LEFT><BR>
+
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<FONT COLOR="#000000"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: transparent">In
+the <B>Enable CORS </B>dialog, click the <B>GET </B>check box for
+<B>Access-Control-Allow-Methods </B>and enter <B>* </B>for the value
+of <B>Access-Control-Allow-Origin.</B>  </SPAN></FONT></FONT></FONT>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<BR>
+
+<IMG SRC="whitepaper_direct_html_m7c158d08.gif" NAME="graphics14" ALIGN=LEFT WIDTH=659 HEIGHT=272 BORDER=0><BR CLEAR=LEFT><BR>
+
+<BR>
+
+<FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: #ffffff">Expand
+the <B>Mapping templates </B>section below and add a Mapping template
+of <B>Content type application/json </B>and in an <B>Empty </B>template
+copy in the code block below:</SPAN></FONT></FONT>
+<BR>
+<BR>
+
+
+
+<div style="font-size:9pt; padding-left:10px; background-color:#cfe7f5">
+	<CODE>
+		<BR>
+		#set($inputRoot = $input.path('$'))
+		<BR>
+		{
+		<BR>
+		<span style="padding-left:20px">"statusCode": 200,
+		<BR>
+		<span style="padding-left:20px">"headers": {
+		<BR>
+		<span style="padding-left:30px">"Access-Control-Allow-Origin": "'https://www.<<your URL>>.com'",
+		<BR>
+		<span style="padding-left:30px">"Access-Control-Allow-Methods": "'*'",
+		<BR>
+		<span style="padding-left:30px">"Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+		<BR>
+		<span style="padding-left:10px">},
+		<BR>
+		<span style="padding-left:10px">"body": $input.json('$')
+		<BR>
+		}
+		<BR>
+		<BR>
+	</CODE>
+	</div>
+
+
+
+<BR>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<FONT COLOR="#000000"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: transparent">Click
+<B>Save </B>to continue.  </SPAN></FONT></FONT></FONT>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<BR>
+
+
+<P STYLE="margin-bottom: 0in; background: #ffffff"><FONT COLOR="#000000"><SPAN STYLE="background: #ffffff"><SPAN STYLE="background: #cfe7f5">
+<FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B>4.
+Deploy and Test </SPAN></B><SPAN STYLE="font-weight: normal"><SPAN STYLE="background: #cfe7f5">
+</SPAN></SPAN></SPAN></FONT></FONT></FONT>
+
+
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+	<IMG SRC="whitepaper_direct_html_5476a85e.jpg" NAME="graphics16" ALIGN=LEFT WIDTH=649 HEIGHT=269 BORDER=0><BR CLEAR=LEFT><BR>
+	
+	<BR>
+
+
+
+<FONT COLOR="#000000"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: transparent">Now
+you're ready to <B>Test </B>the API by clicking the <B>Test </B>tab
+on the main <B>Resources</B> console.  The test shows exactly the
+JSON that will be returned to your client or any errors in your
+configuration.</SPAN></FONT></FONT></FONT>
+<BR>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<IMG SRC="whitepaper_direct_html_32a1833c.gif" NAME="graphics17" ALIGN=LEFT WIDTH=665 HEIGHT=171 BORDER=0><BR CLEAR=LEFT>
+	
+
+<BR>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<FONT COLOR="#000000"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: transparent">API
+Gateway returns the raw DynamoDB output where the value for each key
+is itself a one-element dictionary <B>{ Type : Value }</B> and the
+<B>Type</B> is a one-letter code, <B>N </B>for Number and <B>S </B>for
+String.  Your Lambda function might normally filter, sort and format
+the output before returning.  This logic will now have to be done
+entirely on the client in Javascript.  Consider that, especially the
+filtering component, before committing to the direct integration and
+changing your client.  Returning large data sets back over HTTP may
+entirely negate your performance improvement from bypassing Lambda in
+the first place.</SPAN></FONT></FONT></FONT>
+
+<BR>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<FONT COLOR="#000000"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: transparent">Click
+<B>Deploy API </B>and choose a <B>Stage.</B>  You're taken to the
+<B>Stages </B>console.  Expand the tree to your <B>GET </B>method. 
+Copy the <B>Invoke URL </B>and paste that into your browser window
+for one more test.</SPAN></FONT></FONT></FONT>
+<BR>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<IMG SRC="whitepaper_direct_html_m6f1a1b5f.gif" NAME="graphics18" ALIGN=LEFT WIDTH=659 HEIGHT=233 BORDER=0><BR CLEAR=LEFT><BR>
+
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<FONT COLOR="#000000"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: transparent">That's
+the URL your Javascript will call.   Note again the format of the
+returned data and how your client  handles it.  </SPAN></FONT></FONT></FONT>
+
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<FONT COLOR="#000000"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: transparent">Below
+is the code I use to convert the raw trades data returned in the <B>Test
+</B>above direct from DynamoDB into an array of dictionaries [ { sk:
+&lt;trade name&gt;, nl: &lt;number of leedz&gt; }, &hellip;. ] <B>sorted
+</B>by 'nl'.  
+
+<BR>
+<BR>
+
+Before
+the integration this trimming and sorting was done in the (now
+bypassed) python Lambda function.  </SPAN></FONT></FONT></FONT>
+
+<BR>
+<BR>
+
+<div style="font-size:9pt; padding-left:9px; background-color:#cfe7f5">
+	<CODE>
+	<BR>
+	
+	<span style="padding-left:10px"></span>const theURL = new URL(DIRECT_GATEWAY + "tradesDirect");
+	<BR>
+	<span style="padding-left:10px"></span>let json_obj= null;
+	<BR>
+	<BR>
+	<span style="padding-left:10px"></span>await doGetHeaders( theURL, {} )
+	<BR>
+	<span style="padding-left:10px"></span>.then(data => {
+	<BR>
+	<BR>
+	<span style="padding-left:30px"></span>json_obj = data;
+	<BR>
+	<BR>
+	<span style="padding-left:10px"></span>}).catch(error => {
+	<BR>
+	<span style="padding-left:30px"></span>printError("doGet()", error);
+	<BR>
+	<span style="padding-left:30px"></span>throwError('doGet()', 'There was a problem with the fetch operation:' + 	error.message);
+	<BR>
+	<span style="padding-left:10px"></span>});
+	<BR>
+	<BR>
+	</CODE>
+	</div>
+	<BR>
+
+		<BR>
+		
+
+
+
+			<div style="font-size:9pt; padding-left:9px; background-color:#cfe7f5">
+				<CODE>
+				<BR>
+				<span style="padding-left:0px"></span>
+				<BR>
+				<span style="padding-left:0px"></span>// Check if 'Items' exists in the response data
+				<BR>
+				<span style="padding-left:0px"></span>if ('Items' in json_obj.body) {
+				<BR>
+				<span style="padding-left:0px"></span>
+				<BR>
+				<span style="padding-left:10px"></span>let return_data = toArray( json_obj.body['Items'] );
+				<BR>
+				<span style="padding-left:10px"></span>// Sort the data by 'nl' field in descending order
+				<BR>
+				<span style="padding-left:10px"></span>return_data.sort((a, b) => b.nl - a.nl);
+				<BR>
+				<span style="padding-left:0px"></span>
+				<BR>
+				<span style="padding-left:10px"></span>return return_data;
+				<BR>
+				<span style="padding-left:0px"></span>}
+				<BR>
+				<span style="padding-left:0px"></span>
+				<BR>
+				<span style="padding-left:0px"></span>// input is the HTTP response body.Items dictionary
+				<BR>
+				<span style="padding-left:0px"></span>function toArray(items) {
+				<BR>
+				<span style="padding-left:40px"></span>return items.map(item => {
+				<BR>
+				<span style="padding-left:80px"></span>// Create a new object without the 'pk' key
+				<BR>
+				<span style="padding-left:80px"></span>const newItem = {};
+				<BR>
+				<span style="padding-left:80px"></span>for (const key in item) {
+				<BR>
+				<span style="padding-left:120px"></span>if (key !== 'pk') {
+				<BR>
+				<span style="padding-left:160px"></span>// Extract the value from the 'S' or 'N' key
+				<BR>
+				<span style="padding-left:160px"></span>newItem[key] = item[key]['S'] || item[key]['N'];
+				<BR>
+				<span style="padding-left:120px"></span>}
+				<BR>
+				<span style="padding-left:80px"></span>}
+				<BR>
+				<span style="padding-left:80px"></span>return newItem;
+				<BR>
+				<span style="padding-left:40px"></span>});
+				<BR>
+				<span style="padding-left:0px"></span>}
+				<BR>
+				<span style="padding-left:0px"></span>
+				<BR>
+				</CODE>
+				</div>
+				<BR>
+				
+
+
+
+<P STYLE="margin-bottom: 0in; background: #ffffff"><FONT COLOR="#000000"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B><SPAN STYLE="background: transparent">Looking
+Forward</SPAN></B></FONT></FONT></FONT>
+<BR>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<FONT COLOR="#000000"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: transparent">The
+original goal of the Direct Integration project was to speed up the
+stats page that users see before they  log into <FONT COLOR="#006633"><B>theleedz.com.</B></FONT>
+ So far I've integrated the <B>stats </B>and <B>trades.</B>  Both
+went from four seconds to almost instantaneous &ndash; one second or
+less.  The results are so dramatic that I've made a list of other
+functions to re-engineer in the main workflow of the app.  The list
+of DynamoDB actions that can be called from the REST API includes put
+and update operations.  A future project would include mapping
+incoming data from the client into the JSON mapping template to
+inform those database operations.</SPAN></FONT></FONT></FONT>
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<BR>
+<FONT COLOR="#000000"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: transparent">In
+the meantime, good luck using this info to optimize your own AWS
+integrations.</SPAN></FONT></FONT></FONT>
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<BR>
+
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<FONT COLOR="#000000"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><SPAN STYLE="background: transparent">+Scott
+Gross</SPAN></FONT></FONT></FONT>
+<P STYLE="margin-bottom: 0in; background: #ffffff"><FONT COLOR="#000000"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B><SPAN STYLE="background: transparent">theleedz.com@gmail.com</SPAN></B></FONT></FONT></FONT>
+<P STYLE="margin-bottom: 0in; background: #ffffff"><FONT COLOR="#006633"><FONT FACE="Arial, sans-serif"><FONT SIZE=2 STYLE="font-size: 11pt"><B><SPAN STYLE="background: transparent">theleedz.com</SPAN></B></FONT></FONT></FONT>
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<BR>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<BR>
+
+<P STYLE="margin-bottom: 0in; background: #ffffff; font-weight: normal">
+<BR>
+</TD></TR>
+</TABLE>
+
+
+        <div class="row" style="padding:16px; background-color: darkgreen; color:white; font-size:0.8em; font-family:'Arial'"">
+                <span style="margin-left:10vw">
+                All content is &copy;2024 The Leedz, all rights reserved, and may not be reproduced for 
+                commercial purposes without written permission.
+                </span>
+            </div>
+
+</BODY>
+</HTML>
